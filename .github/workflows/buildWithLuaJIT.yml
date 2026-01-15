@@ -1,4 +1,4 @@
-name: Build with LuaJIT + Latest LuaBridge (Static)
+name: Build with LuaJIT + Latest LuaBridge (Fix Headers)
 
 on:
   push:
@@ -10,13 +10,11 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    # 1. 检出 TrafficMonitorLuaPlugin 源码
     - name: Checkout Plugin Source
       uses: actions/checkout@v3
       with:
         path: repo
 
-    # 2. 检出 LuaJIT 源码 (用于替换 Lua 5.4)
     - name: Checkout LuaJIT
       uses: actions/checkout@v3
       with:
@@ -24,19 +22,15 @@ jobs:
         path: luajit
         ref: v2.1
 
-    # 3. 检出最新的 LuaBridge 源码 (用于替换旧版)
-    #    注意：LuaBridge 3.x 需要 C++17
     - name: Checkout Latest LuaBridge
       uses: actions/checkout@v3
       with:
-        repository: vinniefalco/LuaBridge
+        repository: kunitoki/LuaBridge
         path: luabridge
 
-    # 4. 配置 MSBuild
     - name: Add MSBuild to PATH
       uses: microsoft/setup-msbuild@v1.1
 
-    # 5. 编译 LuaJIT (静态库)
     - name: Compile LuaJIT (Static)
       shell: cmd
       run: |
@@ -45,55 +39,61 @@ jobs:
         copy lua51.lib luajit.lib
         dir *.lib
 
-    # 6. 超级魔改步骤：修改项目文件和源码
-    - name: Patch Project (LuaJIT + LuaBridge + C++17)
+    - name: Patch Project and Fix Headers
       shell: powershell
       run: |
         $root = "$pwd\repo"
-        # 请根据你的实际目录结构调整下一行 (如果 .vcxproj 在根目录则去掉子目录)
-        $projDir = "$root" 
+        $projDir = "$root"
         $vcxproj = "$projDir\TrafficMonitorLuaPlugin.vcxproj"
         $cppFile = "$projDir\TrafficMonitorLuaPlugin.cpp"
-        
-        # 依赖库绝对路径
         $luajitSrc = "$pwd\luajit\src"
-        # LuaBridge 3 的头文件在 Source 目录下
         $luabridgeInclude = "$pwd\luabridge\Source" 
 
+        # --- 关键修正：生成正确的 lua.hpp ---
+        # 必须同时包含 lua.h, lualib.h, lauxlib.h，并使用 extern "C" 避免名称修饰问题
+        $luaHppContent = @"
+        // Auto-generated lua.hpp for LuaJIT static link
+        #pragma once
+        extern "C" {
+        #include "lua.h"
+        #include "lualib.h"
+        #include "lauxlib.h"
+        }
+        "@
+        Set-Content -Path "$luajitSrc\lua.hpp" -Value $luaHppContent
+        Write-Host ">>> lua.hpp created successfully."
+
+        # --- 修改 .vcxproj ---
         Write-Host ">>> Reading .vcxproj..."
         $xml = Get-Content $vcxproj -Raw
 
-        # --- 修改 1: 升级 C++ 标准到 C++17 (LuaBridge 3 必须) ---
-        # 查找 <ClCompile> 并确保其中包含 C++17 设置
+        # 1. 强制升级到 C++17 (LuaBridge 3 需要)
         if ($xml -match '<LanguageStandard>') {
             $xml = $xml -replace '<LanguageStandard>.*?</LanguageStandard>', '<LanguageStandard>stdcpp17</LanguageStandard>'
         } else {
-            # 如果原本没有设置标准，插入到 <ClCompile> 块中
             $xml = $xml -replace '<ClCompile>', "<ClCompile>`r`n      <LanguageStandard>stdcpp17</LanguageStandard>"
         }
-        # 必须把符合模式关掉，否则C++17可能会有冲突
+        # 关闭严格模式，防止 C++17 下 Windows SDK 报错
         $xml = $xml -replace '<ConformanceMode>true</ConformanceMode>', '<ConformanceMode>false</ConformanceMode>'
 
-        # --- 修改 2: 替换 Include 路径 ---
-        # 移除原本指向 lua54 或 include 的路径，替换为 LuaJIT 和 新版 LuaBridge
-        # 下面的正则将替换 <IncludePath> 标签内的内容
+        # 2. 修正 Include 路径 (指向 LuaJIT 和 LuaBridge/Source)
         $newIncludePath = "<IncludePath>$luajitSrc;$luabridgeInclude;`$(ProjectDir);`$(IncludePath)</IncludePath>"
         $xml = [regex]::Replace($xml, '<IncludePath>.*?</IncludePath>', $newIncludePath)
 
-        # --- 修改 3: 替换 Lib 路径 ---
+        # 3. 修正 Lib 路径
         $newLibDir = "<AdditionalLibraryDirectories>$luajitSrc;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>"
         $xml = [regex]::Replace($xml, '<AdditionalLibraryDirectories>.*?</AdditionalLibraryDirectories>', $newLibDir)
 
-        # --- 修改 4: 替换依赖文件名 ---
+        # 4. 替换依赖库文件名
         $xml = $xml -replace 'lua54.lib', 'lua51.lib'
 
-        # --- 修改 5: 添加预处理器定义 LUA_LIB (静态链接需要) ---
+        # 5. 添加静态库宏 (LUA_LIB) 并移除可能导致冲突的宏
         $xml = $xml -replace '<PreprocessorDefinitions>', '<PreprocessorDefinitions>LUA_LIB;'
 
         Set-Content -Path $vcxproj -Value $xml
-        Write-Host ">>> .vcxproj Patched (Includes, C++17, LuaJIT)."
+        Write-Host ">>> .vcxproj Patched."
 
-        # --- 修改 6: 修正 C++ 源码以适配 Lua 5.1/LuaJIT ---
+        # --- 修改 C++ 源码以适配 LuaJIT (Lua 5.1) ---
         Write-Host ">>> Patching C++ Source..."
         $cppContent = Get-Content $cppFile -Raw
 
@@ -101,30 +101,39 @@ jobs:
         $cppContent = $cppContent -replace 'luaL_checkversion\(L\);', '// luaL_checkversion(L);'
 
         # 替换 luaL_newlib 为 luaL_register (兼容 LuaJIT)
-        # 这是一个简单的替换逻辑，寻找 luaL_newlib(L, name)
         $pattern = 'luaL_newlib\s*\(\s*L\s*,\s*([a-zA-Z0-9_]+)\s*\);'
         $cppContent = [regex]::Replace($cppContent, $pattern, {
             param($match)
             return "lua_newtable(L);`r`n    luaL_register(L, NULL, $($match.Groups[1].Value));"
         })
-
-        # 确保包含正确的 Lua 头文件
-        if ($cppContent -notmatch '#include "lua.hpp"') {
-            # 手动创建 lua.hpp 兼容层
-            Set-Content -Path "$luajitSrc\lua.hpp" -Value '#include "lua.h"`r`n#include "lualib.h"`r`n#include "lauxlib.h"'
+        
+        # 兼容性修复：如果在 LuaScriptManager.cpp 中也使用了 luaL_newlib 或 openlibs
+        # 有时 TrafficMonitor 插件结构不同，可能需要检查其他文件
+        # 这里假设主要逻辑在 TrafficMonitorLuaPlugin.cpp 或 LuaScriptManager.cpp
+        # 我们简单遍历一下所有 cpp 文件做替换
+        Get-ChildItem -Path $projDir -Filter "*.cpp" | ForEach-Object {
+            $code = Get-Content $_.FullName -Raw
+            $newCode = $code -replace 'luaL_checkversion\(L\);', '// luaL_checkversion(L);'
+            $newCode = [regex]::Replace($newCode, $pattern, {
+                param($match)
+                return "lua_newtable(L);`r`n    luaL_register(L, NULL, $($match.Groups[1].Value));"
+            })
+            # 解决 LuaScriptManager 中可能的 includes 问题，确保它能找到 lua.hpp
+            if ($newCode -match '#include "lua.hpp"') {
+                 # 没问题，已经有了
+            }
+            Set-Content -Path $_.FullName -Value $newCode
         }
 
-        Set-Content -Path $cppFile -Value $cppContent
+        Set-Content -Path $cppFile -Value $cppContent # 再次保存主文件以防覆盖
         Write-Host ">>> Source Code Patched."
 
-    # 7. 编译
     - name: Build Solution
       run: |
         msbuild repo\TrafficMonitorLuaPlugin.sln /p:Configuration=Release /p:Platform=x64
 
-    # 8. 上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: TrafficMonitorLuaPlugin_LuaJIT_NewLuaBridge
+        name: TrafficMonitorLuaPlugin_Fixed
         path: repo\x64\Release\plugins\TrafficMonitorLuaPlugin.dll
