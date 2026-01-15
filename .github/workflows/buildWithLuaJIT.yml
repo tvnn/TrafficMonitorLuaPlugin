@@ -25,7 +25,7 @@ jobs:
     - name: Checkout Latest LuaBridge
       uses: actions/checkout@v3
       with:
-        repository: kunitoki/LuaBridge
+        repository: vinniefalco/LuaBridge
         path: luabridge
 
     - name: Add MSBuild to PATH
