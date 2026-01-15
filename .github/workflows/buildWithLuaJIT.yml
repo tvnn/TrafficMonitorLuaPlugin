@@ -28,8 +28,10 @@ jobs:
         repository: vinniefalco/LuaBridge
         path: luabridge
 
-    - name: Add MSBuild to PATH
-      uses: microsoft/setup-msbuild@v1.1
+    - name: Setup MSVC Dev Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
 
     - name: Compile LuaJIT (Static)
       shell: cmd
