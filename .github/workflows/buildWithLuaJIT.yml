@@ -51,7 +51,7 @@ jobs:
       run: |
         $root = "$pwd\repo"
         # 请根据你的实际目录结构调整下一行 (如果 .vcxproj 在根目录则去掉子目录)
-        $projDir = "$root\TrafficMonitorLuaPlugin" 
+        $projDir = "$root" 
         $vcxproj = "$projDir\TrafficMonitorLuaPlugin.vcxproj"
         $cppFile = "$projDir\TrafficMonitorLuaPlugin.cpp"
         
